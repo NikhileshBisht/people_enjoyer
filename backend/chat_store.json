@@ -1,0 +1,76 @@
+{
+  "nikhileshhotshot2002@gmail.com::nikkihotshot@gmail.com": [
+    {
+      "id": "msg-1778173185693-5245",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "hy",
+      "sent_at": "2026-05-07T16:59:45.693277+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173188793-9195",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "das",
+      "sent_at": "2026-05-07T16:59:48.793546+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173199579-5916",
+      "sender": "nikhileshhotshot2002@gmail.com",
+      "recipient": "nikkihotshot@gmail.com",
+      "text": "am good",
+      "sent_at": "2026-05-07T16:59:59.579288+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173330094-8870",
+      "sender": "nikhileshhotshot2002@gmail.com",
+      "recipient": "nikkihotshot@gmail.com",
+      "text": "am good",
+      "sent_at": "2026-05-07T17:02:10.094098+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173486488-2387",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "yes",
+      "sent_at": "2026-05-07T17:04:46.488689+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173488319-1567",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "wby",
+      "sent_at": "2026-05-07T17:04:48.319694+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1778173496967-9874",
+      "sender": "nikhileshhotshot2002@gmail.com",
+      "recipient": "nikkihotshot@gmail.com",
+      "text": "am good too",
+      "sent_at": "2026-05-07T17:04:56.967369+00:00",
+      "read": false
+    },
+    {
+      "id": "msg-1778173502156-2486",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "nice to hear",
+      "sent_at": "2026-05-07T17:05:02.156449+00:00",
+      "read": false
+    },
+    {
+      "id": "msg-1778173504991-4471",
+      "sender": "nikhileshhotshot2002@gmail.com",
+      "recipient": "nikkihotshot@gmail.com",
+      "text": "+1",
+      "sent_at": "2026-05-07T17:05:04.991667+00:00",
+      "read": false
+    }
+  ]
+}
