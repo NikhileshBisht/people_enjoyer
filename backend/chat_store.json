@@ -54,7 +54,7 @@
       "recipient": "nikkihotshot@gmail.com",
       "text": "am good too",
       "sent_at": "2026-05-07T17:04:56.967369+00:00",
-      "read": false
+      "read": true
     },
     {
       "id": "msg-1778173502156-2486",
@@ -70,6 +70,14 @@
       "recipient": "nikkihotshot@gmail.com",
       "text": "+1",
       "sent_at": "2026-05-07T17:05:04.991667+00:00",
+      "read": true
+    },
+    {
+      "id": "msg-1779717671158-6334",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "ok",
+      "sent_at": "2026-05-25T14:01:11.158247+00:00",
       "read": false
     }
   ]

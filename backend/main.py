@@ -1,16 +1,17 @@
+import math
 import os
 import random
-import smtplib
 import json
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from typing import Dict, Optional, Any, List
 
 import jwt
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+
+from otp import OtpService, OtpStore, init_otp_service, router as otp_router
 
 app = FastAPI(title="OTP JWT Auth Service")
 
@@ -25,32 +26,17 @@ app.add_middleware(
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
-OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "5"))
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "no-reply@example.com")
-DEV_EXPOSE_OTP = os.getenv("DEV_EXPOSE_OTP", "true").lower() == "true"
 
 DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
 USERS_FILE = DATA_DIR / "users.json"
-OTP_FILE = DATA_DIR / "otp_store.json"
 CHAT_FILE = DATA_DIR / "chat_store.json"
 
 users: Dict[str, dict] = {}
-otp_store: Dict[str, dict] = {}
+otp_store = OtpStore()
 ws_connections: Dict[str, WebSocket] = {}
 chat_store: Dict[str, List[dict]] = {}
 
-
-class EmailRequest(BaseModel):
-    email: EmailStr
-
-
-class VerifyOtpRequest(BaseModel):
-    email: EmailStr
-    otp: str
+app.include_router(otp_router)
 
 
 class SendMessageRequest(BaseModel):
@@ -62,8 +48,6 @@ def _ensure_data_files() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not USERS_FILE.exists():
         USERS_FILE.write_text("{}", encoding="utf-8")
-    if not OTP_FILE.exists():
-        OTP_FILE.write_text("{}", encoding="utf-8")
     if not CHAT_FILE.exists():
         CHAT_FILE.write_text("{}", encoding="utf-8")
 
@@ -86,82 +70,28 @@ def _save_json(path: Path, payload: Dict[str, dict]) -> None:
 
 
 def _load_state() -> None:
-    global users, otp_store, chat_store
+    global users, chat_store
     _ensure_data_files()
     users = _load_json(USERS_FILE)
-    otp_store = _load_json(OTP_FILE)
+    otp_store.load()
     loaded_chats = _load_json(CHAT_FILE)
     chat_store = {k: v for k, v in loaded_chats.items() if isinstance(v, list)}
+    init_otp_service(
+        OtpService(
+            store=otp_store,
+            users=users,
+            save_users=_save_users,
+            create_access_token=_create_access_token,
+        )
+    )
 
 
 def _save_users() -> None:
     _save_json(USERS_FILE, users)
 
 
-def _save_otps() -> None:
-    _save_json(OTP_FILE, otp_store)
-
-
 def _save_chats() -> None:
     _save_json(CHAT_FILE, chat_store)
-
-
-def _parse_iso_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _cleanup_expired_otps() -> None:
-    now = datetime.now(tz=timezone.utc)
-    expired_keys = []
-    for key, record in otp_store.items():
-        expires_at = record.get("expires_at")
-        if not expires_at:
-            expired_keys.append(key)
-            continue
-        try:
-            expires_dt = _parse_iso_datetime(expires_at)
-        except ValueError:
-            expired_keys.append(key)
-            continue
-        if now > expires_dt:
-            expired_keys.append(key)
-    for key in expired_keys:
-        otp_store.pop(key, None)
-    if expired_keys:
-        _save_otps()
-
-
-def _purpose_key(email: str, purpose: str) -> str:
-    return f"{purpose}:{email.lower()}"
-
-
-def _generate_otp() -> str:
-    return str(random.randint(100000, 999999))
-
-
-def _send_email_otp(email: str, otp: str, purpose: str) -> None:
-    subject = f"Your {purpose} OTP code"
-    body = (
-        f"Your OTP for {purpose} is: {otp}\n"
-        f"This code will expire in {OTP_EXPIRY_MINUTES} minutes."
-    )
-
-    if SMTP_HOST and SMTP_USER and SMTP_PASSWORD:
-        message = EmailMessage()
-        message["Subject"] = subject
-        message["From"] = SMTP_FROM
-        message["To"] = email
-        message.set_content(body)
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(message)
-    else:
-        print(f"[DEV EMAIL] to={email} subject={subject} body={body}")
 
 
 def _create_access_token(email: str) -> str:
@@ -256,6 +186,56 @@ def _conversation_payload(viewer_email: str, partner_email: str, messages: List[
     }
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    return 2 * radius_km * math.asin(math.sqrt(min(1.0, a)))
+
+
+def _build_people_payload(
+    viewer_email: str, viewer_lat: float, viewer_lng: float, range_km: float
+) -> Dict[str, Any]:
+    results = []
+    for email, data in users.items():
+        if email == viewer_email:
+            continue
+        if email not in ws_connections:
+            continue
+        if not data.get("people_finder_live"):
+            continue
+        lat = data.get("lat")
+        lng = data.get("lng")
+        if lat is None or lng is None:
+            continue
+        distance_km = _haversine_km(viewer_lat, viewer_lng, float(lat), float(lng))
+        if distance_km > range_km:
+            continue
+        results.append(
+            {
+                "id": email,
+                "email": email,
+                "name": data.get("name") or email.split("@", 1)[0],
+                "avatar": data.get("avatar") or _build_avatar(email),
+                "bio": data.get("bio") or "Available on People Finder",
+                "lat": lat,
+                "lng": lng,
+                "distanceKm": round(distance_km, 2),
+                "online": True,
+            }
+        )
+
+    results.sort(key=lambda item: item["distanceKm"])
+    return {
+        "type": "people_matches",
+        "rangeKm": range_km,
+        "you": {"email": viewer_email, "lat": viewer_lat, "lng": viewer_lng},
+        "matches": results,
+    }
+
+
 def _build_match_payload(viewer_email: str, from_currency: str, to_currency: str) -> Dict[str, Any]:
     viewer = users.get(viewer_email, {})
     viewer_lat = viewer.get("lat")
@@ -298,96 +278,6 @@ def _build_match_payload(viewer_email: str, from_currency: str, to_currency: str
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-@app.post("/auth/register/request-otp")
-def request_register_otp(request: EmailRequest):
-    _cleanup_expired_otps()
-    email = request.email.lower()
-    if email in users:
-        raise HTTPException(status_code=409, detail="User already registered.")
-
-    otp = _generate_otp()
-    otp_store[_purpose_key(email, "register")] = {
-        "otp": otp,
-        "expires_at": (
-            datetime.now(tz=timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-        ).isoformat(),
-    }
-    _save_otps()
-    _send_email_otp(email, otp, "registration")
-
-    response = {"message": "Registration OTP sent to email."}
-    if DEV_EXPOSE_OTP:
-        response["dev_otp"] = otp
-    return response
-
-
-@app.post("/auth/register/verify-otp")
-def verify_register_otp(request: VerifyOtpRequest):
-    _cleanup_expired_otps()
-    email = request.email.lower()
-    key = _purpose_key(email, "register")
-    record = otp_store.get(key)
-    if not record:
-        raise HTTPException(status_code=400, detail="Registration OTP not requested.")
-    if datetime.now(tz=timezone.utc) > _parse_iso_datetime(record["expires_at"]):
-        otp_store.pop(key, None)
-        _save_otps()
-        raise HTTPException(status_code=400, detail="Registration OTP expired.")
-    if request.otp.strip() != record["otp"]:
-        raise HTTPException(status_code=400, detail="Invalid OTP.")
-
-    users[email] = {"email": email, "created_at": datetime.now(tz=timezone.utc).isoformat()}
-    _save_users()
-    otp_store.pop(key, None)
-    _save_otps()
-    token = _create_access_token(email)
-    return {"message": "Registration successful.", "access_token": token, "token_type": "bearer"}
-
-
-@app.post("/auth/login/request-otp")
-def request_login_otp(request: EmailRequest):
-    _cleanup_expired_otps()
-    email = request.email.lower()
-    if email not in users:
-        raise HTTPException(status_code=404, detail="User not found. Please register first.")
-
-    otp = _generate_otp()
-    otp_store[_purpose_key(email, "login")] = {
-        "otp": otp,
-        "expires_at": (
-            datetime.now(tz=timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
-        ).isoformat(),
-    }
-    _save_otps()
-    _send_email_otp(email, otp, "login")
-
-    response = {"message": "Login OTP sent to email."}
-    if DEV_EXPOSE_OTP:
-        response["dev_otp"] = otp
-    return response
-
-
-@app.post("/auth/login/verify-otp")
-def verify_login_otp(request: VerifyOtpRequest):
-    _cleanup_expired_otps()
-    email = request.email.lower()
-    key = _purpose_key(email, "login")
-    record = otp_store.get(key)
-    if not record:
-        raise HTTPException(status_code=400, detail="Login OTP not requested.")
-    if datetime.now(tz=timezone.utc) > _parse_iso_datetime(record["expires_at"]):
-        otp_store.pop(key, None)
-        _save_otps()
-        raise HTTPException(status_code=400, detail="Login OTP expired.")
-    if request.otp.strip() != record["otp"]:
-        raise HTTPException(status_code=400, detail="Invalid OTP.")
-
-    otp_store.pop(key, None)
-    _save_otps()
-    token = _create_access_token(email)
-    return {"message": "Login successful.", "access_token": token, "token_type": "bearer"}
 
 
 @app.get("/auth/me")
@@ -527,6 +417,7 @@ async def match_socket(websocket: WebSocket):
                 user = users[email]
                 user["from_currency"] = from_currency
                 user["to_currency"] = to_currency
+                user["people_finder_live"] = False
                 if isinstance(lat, (int, float)):
                     user["lat"] = float(lat)
                 if isinstance(lng, (int, float)):
@@ -536,6 +427,35 @@ async def match_socket(websocket: WebSocket):
                 _save_users()
 
                 await websocket.send_json(_build_match_payload(email, from_currency, to_currency))
+            elif message_type == "search_people":
+                lat = raw.get("lat")
+                lng = raw.get("lng")
+                range_km = raw.get("rangeKm", 10)
+
+                if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+                    await websocket.send_json(
+                        {"type": "error", "message": "Your current location is required."}
+                    )
+                    continue
+
+                try:
+                    range_km = float(range_km)
+                except (TypeError, ValueError):
+                    range_km = 10.0
+                range_km = max(0.5, min(100.0, range_km))
+
+                user = users[email]
+                user["lat"] = float(lat)
+                user["lng"] = float(lng)
+                user["people_finder_live"] = True
+                user["people_search_range_km"] = range_km
+                user["last_seen_at"] = datetime.now(tz=timezone.utc).isoformat()
+                users[email] = user
+                _save_users()
+
+                await websocket.send_json(
+                    _build_people_payload(email, float(lat), float(lng), range_km)
+                )
             elif message_type == "send_message":
                 to_email = str(raw.get("toEmail", "")).lower()
                 text = str(raw.get("text", ""))
@@ -556,6 +476,9 @@ async def match_socket(websocket: WebSocket):
     finally:
         if ws_connections.get(email) is websocket:
             ws_connections.pop(email, None)
+        if email in users:
+            users[email]["people_finder_live"] = False
+            _save_users()
 
 
 _load_state()
