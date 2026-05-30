@@ -1,0 +1,22 @@
+{
+  "nikhileshhotshot2002@gmail.com::nikkihotshot@gmail.com": [
+    {
+      "id": "msg-1780032907256-5388",
+      "sender": "nikhileshhotshot2002@gmail.com",
+      "recipient": "nikkihotshot@gmail.com",
+      "text": "hi",
+      "sent_at": "2026-05-29T05:35:07.256917+00:00",
+      "read": true,
+      "module": "people"
+    },
+    {
+      "id": "msg-1780032912020-8628",
+      "sender": "nikkihotshot@gmail.com",
+      "recipient": "nikhileshhotshot2002@gmail.com",
+      "text": "hy",
+      "sent_at": "2026-05-29T05:35:12.020788+00:00",
+      "read": true,
+      "module": "people"
+    }
+  ]
+}

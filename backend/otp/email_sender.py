@@ -7,7 +7,6 @@ from typing import List, Tuple
 from fastapi import HTTPException
 
 from .config import (
-    OTP_EXPIRY_MINUTES,
     SMTP_FROM,
     SMTP_HOST,
     SMTP_PASSWORD,
@@ -15,6 +14,7 @@ from .config import (
     SMTP_USER,
     smtp_is_configured,
 )
+from .email_template import build_otp_html, build_otp_plain_text
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +58,9 @@ def _send_with_mode(mode: str, port: int, message: EmailMessage) -> None:
 
 
 def send_otp_email(email: str, otp: str, purpose: str) -> None:
-    subject = f"Your {purpose} OTP code"
-    body = (
-        f"Your OTP for {purpose} is: {otp}\n"
-        f"This code will expire in {OTP_EXPIRY_MINUTES} minutes."
-    )
+    subject = "Verify Your Account — MacNik"
+    plain_body = build_otp_plain_text(otp, purpose)
+    html_body = build_otp_html(otp, purpose)
 
     if not smtp_is_configured():
         raise HTTPException(
@@ -78,7 +76,8 @@ def send_otp_email(email: str, otp: str, purpose: str) -> None:
     message["Subject"] = subject
     message["From"] = SMTP_FROM
     message["To"] = email
-    message.set_content(body)
+    message.set_content(plain_body)
+    message.add_alternative(html_body, subtype="html")
 
     errors: List[str] = []
     for mode, port in _delivery_attempts():

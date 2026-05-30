@@ -1,9 +1,8 @@
+import json
 import math
 import os
-import random
-import json
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Optional, Any, List
 
 import jwt
@@ -12,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 
 from otp import OtpService, OtpStore, init_otp_service, router as otp_router
+from services import chat_service, people_service
 
 app = FastAPI(title="OTP JWT Auth Service")
 
@@ -29,12 +29,10 @@ JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
 
 DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
 USERS_FILE = DATA_DIR / "users.json"
-CHAT_FILE = DATA_DIR / "chat_store.json"
 
 users: Dict[str, dict] = {}
 otp_store = OtpStore()
 ws_connections: Dict[str, WebSocket] = {}
-chat_store: Dict[str, List[dict]] = {}
 
 app.include_router(otp_router)
 
@@ -44,12 +42,14 @@ class SendMessageRequest(BaseModel):
     text: str
 
 
+class PeopleRequestBody(BaseModel):
+    to_email: EmailStr
+
+
 def _ensure_data_files() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not USERS_FILE.exists():
         USERS_FILE.write_text("{}", encoding="utf-8")
-    if not CHAT_FILE.exists():
-        CHAT_FILE.write_text("{}", encoding="utf-8")
 
 
 def _load_json(path: Path) -> Dict[str, dict]:
@@ -70,12 +70,12 @@ def _save_json(path: Path, payload: Dict[str, dict]) -> None:
 
 
 def _load_state() -> None:
-    global users, chat_store
+    global users
     _ensure_data_files()
     users = _load_json(USERS_FILE)
     otp_store.load()
-    loaded_chats = _load_json(CHAT_FILE)
-    chat_store = {k: v for k, v in loaded_chats.items() if isinstance(v, list)}
+    chat_service.load_chats()
+    people_service.load_connections()
     init_otp_service(
         OtpService(
             store=otp_store,
@@ -88,10 +88,6 @@ def _load_state() -> None:
 
 def _save_users() -> None:
     _save_json(USERS_FILE, users)
-
-
-def _save_chats() -> None:
-    _save_json(CHAT_FILE, chat_store)
 
 
 def _create_access_token(email: str) -> str:
@@ -130,60 +126,17 @@ def _build_avatar(email: str) -> str:
     return letters.upper() or "U"
 
 
-def _thread_key(email_a: str, email_b: str) -> str:
-    first, second = sorted([email_a.lower(), email_b.lower()])
-    return f"{first}::{second}"
+def _validate_module(module: str) -> str:
+    module = module.lower()
+    if module not in chat_service.CHAT_MODULES:
+        raise HTTPException(status_code=400, detail="Invalid chat module.")
+    return module
 
 
-def _create_message(sender: str, recipient: str, text: str) -> dict:
-    return {
-        "id": f"msg-{int(datetime.now(tz=timezone.utc).timestamp() * 1000)}-{random.randint(1000, 9999)}",
-        "sender": sender.lower(),
-        "recipient": recipient.lower(),
-        "text": text.strip(),
-        "sent_at": datetime.now(tz=timezone.utc).isoformat(),
-        "read": False,
-    }
-
-
-def _send_message(sender: str, recipient: str, text: str) -> dict:
-    recipient = recipient.lower()
-    sender = sender.lower()
-    if recipient == sender:
-        raise HTTPException(status_code=400, detail="Cannot message yourself.")
-    if recipient not in users:
-        raise HTTPException(status_code=404, detail="Recipient not found.")
-    clean_text = text.strip()
-    if not clean_text:
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
-    if len(clean_text) > 1000:
-        raise HTTPException(status_code=400, detail="Message is too long.")
-
-    thread = _thread_key(sender, recipient)
-    message = _create_message(sender, recipient, clean_text)
-    chat_store.setdefault(thread, []).append(message)
-    _save_chats()
-    return message
-
-
-def _conversation_payload(viewer_email: str, partner_email: str, messages: List[dict]) -> dict:
-    partner = users.get(partner_email, {})
-    unread_count = sum(
-        1
-        for m in messages
-        if m.get("recipient") == viewer_email and not m.get("read", False)
-    )
-    last_message = messages[-1] if messages else None
-    return {
-        "partner": {
-            "email": partner_email,
-            "name": partner.get("name") or partner_email.split("@", 1)[0],
-            "avatar": partner.get("avatar") or _build_avatar(partner_email),
-            "online": partner_email in ws_connections,
-        },
-        "last_message": last_message,
-        "unread_count": unread_count,
-    }
+async def _notify_user(email: str, payload: dict) -> None:
+    socket = ws_connections.get(email)
+    if socket:
+        await socket.send_json(payload)
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -228,24 +181,20 @@ def _build_people_payload(
         )
 
     results.sort(key=lambda item: item["distanceKm"])
+    enriched = people_service.enrich_people_matches(results, viewer_email)
     return {
         "type": "people_matches",
         "rangeKm": range_km,
         "you": {"email": viewer_email, "lat": viewer_lat, "lng": viewer_lng},
-        "matches": results,
+        "matches": enriched,
     }
 
 
 def _build_match_payload(viewer_email: str, from_currency: str, to_currency: str) -> Dict[str, Any]:
-    viewer = users.get(viewer_email, {})
-    viewer_lat = viewer.get("lat")
-    viewer_lng = viewer.get("lng")
-
     results = []
     for email, data in users.items():
         if email == viewer_email:
             continue
-        # Only show users who currently have an active websocket session.
         if email not in ws_connections:
             continue
         if data.get("from_currency") == to_currency and data.get("to_currency") == from_currency:
@@ -267,10 +216,11 @@ def _build_match_payload(viewer_email: str, from_currency: str, to_currency: str
                 }
             )
 
+    viewer = users.get(viewer_email, {})
     return {
         "type": "matches",
         "for": {"fromCurrency": from_currency, "toCurrency": to_currency},
-        "you": {"email": viewer_email, "lat": viewer_lat, "lng": viewer_lng},
+        "you": {"email": viewer_email, "lat": viewer.get("lat"), "lng": viewer.get("lng")},
         "matches": results,
     }
 
@@ -306,75 +256,205 @@ async def logout(authorization: Optional[str] = Header(default=None)):
     return {"message": "Logged out successfully."}
 
 
-@app.get("/chat/conversations")
-def list_conversations(authorization: Optional[str] = Header(default=None)):
+@app.get("/chat/{module}/conversations")
+def list_conversations(module: str, authorization: Optional[str] = Header(default=None)):
+    module = _validate_module(module)
     payload = _decode_bearer(authorization)
     viewer_email = str(payload.get("sub", "")).lower()
     if not viewer_email or viewer_email not in users:
         raise HTTPException(status_code=401, detail="Invalid user.")
 
-    conversations = []
-    for thread_key, messages in chat_store.items():
-        left, right = thread_key.split("::", 1)
-        if viewer_email not in (left, right):
-            continue
-        partner = right if left == viewer_email else left
-        conversations.append(_conversation_payload(viewer_email, partner, messages))
+    partner_filter = None
+    if module == "people":
+        partner_filter = people_service.can_people_chat
 
-    conversations.sort(
-        key=lambda item: (item.get("last_message") or {}).get("sent_at", ""),
-        reverse=True,
+    conversations = chat_service.list_conversations(
+        module,
+        viewer_email,
+        users=users,
+        ws_connections=ws_connections,
+        build_avatar=_build_avatar,
+        partner_filter=partner_filter,
     )
-    return {"conversations": conversations}
+
+    if module == "people":
+        seen = {item["partner"]["email"] for item in conversations}
+        for partner in people_service.list_accepted_connections(
+            viewer_email, users, _build_avatar, ws_connections
+        ):
+            if partner["email"] not in seen:
+                conversations.append(
+                    {
+                        "partner": partner,
+                        "last_message": None,
+                        "unread_count": 0,
+                    }
+                )
+        conversations.sort(
+            key=lambda item: (
+                1 if item.get("last_message") else 0,
+                (item.get("last_message") or {}).get("sent_at", ""),
+            ),
+            reverse=True,
+        )
+
+    return {"module": module, "conversations": conversations}
 
 
-@app.get("/chat/messages/{partner_email}")
-def get_messages(partner_email: str, authorization: Optional[str] = Header(default=None)):
+@app.get("/chat/{module}/messages/{partner_email}")
+def get_messages(
+    module: str, partner_email: str, authorization: Optional[str] = Header(default=None)
+):
+    module = _validate_module(module)
     payload = _decode_bearer(authorization)
     viewer_email = str(payload.get("sub", "")).lower()
-    partner_email = partner_email.lower()
     if not viewer_email or viewer_email not in users:
         raise HTTPException(status_code=401, detail="Invalid user.")
+    partner_email = partner_email.lower()
     if partner_email not in users:
         raise HTTPException(status_code=404, detail="Partner not found.")
+    if module == "people" and not people_service.can_people_chat(viewer_email, partner_email):
+        raise HTTPException(status_code=403, detail="You must be connected to open this chat.")
 
-    thread = _thread_key(viewer_email, partner_email)
-    messages = chat_store.get(thread, [])
-    changed = False
-    for msg in messages:
-        if msg.get("recipient") == viewer_email and not msg.get("read", False):
-            msg["read"] = True
-            changed = True
-    if changed:
-        _save_chats()
-
-    partner = users.get(partner_email, {})
-    return {
-        "partner": {
-            "email": partner_email,
-            "name": partner.get("name") or partner_email.split("@", 1)[0],
-            "avatar": partner.get("avatar") or _build_avatar(partner_email),
-            "online": partner_email in ws_connections,
-        },
-        "messages": messages,
-    }
+    return chat_service.get_messages(
+        module,
+        viewer_email,
+        partner_email,
+        users=users,
+        ws_connections=ws_connections,
+        build_avatar=_build_avatar,
+    )
 
 
-@app.post("/chat/messages")
-async def post_message(request: SendMessageRequest, authorization: Optional[str] = Header(default=None)):
+@app.post("/chat/{module}/messages")
+async def post_message(
+    module: str, request: SendMessageRequest, authorization: Optional[str] = Header(default=None)
+):
+    module = _validate_module(module)
     payload = _decode_bearer(authorization)
     sender_email = str(payload.get("sub", "")).lower()
     if not sender_email or sender_email not in users:
         raise HTTPException(status_code=401, detail="Invalid user.")
 
-    message = _send_message(sender_email, request.to_email, request.text)
+    can_message = None
+    if module == "people":
+        can_message = people_service.can_people_chat
+
+    message = chat_service.send_message(
+        module,
+        sender_email,
+        str(request.to_email),
+        request.text,
+        users=users,
+        can_message=can_message,
+    )
     recipient = message["recipient"]
-
-    recipient_socket = ws_connections.get(recipient)
-    if recipient_socket:
-        await recipient_socket.send_json({"type": "new_message", "message": message})
-
+    await _notify_user(
+        recipient,
+        {"type": "new_message", "module": module, "message": message},
+    )
     return {"message": message}
+
+
+@app.get("/people/requests")
+def people_requests(authorization: Optional[str] = Header(default=None)):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+    return people_service.list_requests(viewer_email, users, _build_avatar, ws_connections)
+
+
+@app.post("/people/requests")
+async def create_people_request(
+    body: PeopleRequestBody, authorization: Optional[str] = Header(default=None)
+):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+
+    record = people_service.send_request(viewer_email, str(body.to_email), users)
+    await _notify_user(
+        record["to"],
+        {
+            "type": "connection_request",
+            "request": {
+                "id": record["id"],
+                "from": {
+                    "email": viewer_email,
+                    "name": users.get(viewer_email, {}).get("name")
+                    or viewer_email.split("@", 1)[0],
+                    "avatar": _build_avatar(viewer_email),
+                },
+            },
+        },
+    )
+    return {"request": record}
+
+
+@app.post("/people/requests/{request_id}/accept")
+async def accept_people_request(request_id: str, authorization: Optional[str] = Header(default=None)):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+
+    record = people_service.accept_request(viewer_email, request_id, users)
+    await _notify_user(
+        record["from"],
+        {
+            "type": "connection_accepted",
+            "connection": {
+                "id": record["id"],
+                "with": {
+                    "email": viewer_email,
+                    "name": users.get(viewer_email, {}).get("name")
+                    or viewer_email.split("@", 1)[0],
+                    "avatar": _build_avatar(viewer_email),
+                },
+            },
+        },
+    )
+    return {"connection": record}
+
+
+@app.delete("/people/requests/{request_id}")
+def cancel_people_request(request_id: str, authorization: Optional[str] = Header(default=None)):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+    return people_service.cancel_request(viewer_email, request_id)
+
+
+@app.post("/people/requests/{request_id}/reject")
+def reject_people_request(request_id: str, authorization: Optional[str] = Header(default=None)):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+    return people_service.reject_request(viewer_email, request_id)
+
+
+@app.delete("/people/connections/{partner_email}")
+async def delete_people_connection(
+    partner_email: str, authorization: Optional[str] = Header(default=None)
+):
+    payload = _decode_bearer(authorization)
+    viewer_email = str(payload.get("sub", "")).lower()
+    if not viewer_email or viewer_email not in users:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+
+    result = people_service.remove_connection(viewer_email, partner_email)
+    await _notify_user(
+        partner_email.lower(),
+        {
+            "type": "connection_removed",
+            "partner": viewer_email,
+        },
+    )
+    return result
 
 
 @app.websocket("/ws/match")
@@ -459,16 +539,35 @@ async def match_socket(websocket: WebSocket):
             elif message_type == "send_message":
                 to_email = str(raw.get("toEmail", "")).lower()
                 text = str(raw.get("text", ""))
+                module = str(raw.get("module", "currency")).lower()
+                if module not in chat_service.CHAT_MODULES:
+                    await websocket.send_json({"type": "error", "message": "Invalid chat module."})
+                    continue
+
+                can_message = None
+                if module == "people":
+                    can_message = people_service.can_people_chat
+
                 try:
-                    message = _send_message(email, to_email, text)
+                    message = chat_service.send_message(
+                        module,
+                        email,
+                        to_email,
+                        text,
+                        users=users,
+                        can_message=can_message,
+                    )
                 except HTTPException as exc:
                     await websocket.send_json({"type": "error", "message": exc.detail})
                     continue
 
-                await websocket.send_json({"type": "message_sent", "message": message})
-                recipient_socket = ws_connections.get(to_email)
-                if recipient_socket:
-                    await recipient_socket.send_json({"type": "new_message", "message": message})
+                await websocket.send_json(
+                    {"type": "message_sent", "module": module, "message": message}
+                )
+                await _notify_user(
+                    to_email,
+                    {"type": "new_message", "module": module, "message": message},
+                )
             else:
                 await websocket.send_json({"type": "error", "message": "Unsupported event type."})
     except WebSocketDisconnect:
