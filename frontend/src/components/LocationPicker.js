@@ -115,7 +115,7 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
 
   const apiBase = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
 
-  const refreshPeopleRequests = async () => {
+const refreshPeopleRequests = useCallback(async () => {
     if (!token || !isPeopleMode) {
       return;
     }
@@ -132,9 +132,9 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
     } catch (error) {
       console.error('Failed to load requests:', error);
     }
-  };
+  }, [token, isPeopleMode, apiBase]);
 
-  const refreshConversations = async () => {
+  const refreshConversations = useCallback(async () => {
     if (!token) {
       return;
     }
@@ -152,7 +152,7 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
     } catch (error) {
       console.error("Failed to load conversations:", error);
     }
-  };
+  }, [token, chatModule, apiBase]);
 
   const openChat = async (user) => {
     if (!user?.email || !token) {
@@ -310,7 +310,7 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
     return () => {
       socket.close();
     };
-  }, [token, apiBase, chatModule]);
+  }, [rangeKm, refreshConversations, refreshPeopleRequests]);
 
   useEffect(() => {
     refreshConversations();
