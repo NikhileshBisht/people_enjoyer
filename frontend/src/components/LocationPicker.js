@@ -44,7 +44,7 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
   const isPeopleMode = mode === 'people';
   const chatModule = isPeopleMode ? 'people' : 'currency';
   const [center, setCenter] = useState(DEFAULT_CENTER);
-  const [isDragging, setIsDragging] = useState(false);
+  const [, setIsDragging] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null); // To show profile modal
   const [currencyOptions, setCurrencyOptions] = useState(["INR", "EUR", "USD", "GBP"]);
   const [fromCurrency, setFromCurrency] = useState("INR");
@@ -315,7 +315,7 @@ const LocationPicker = ({ token, mode = 'currency', onBack, embedded = false }) 
   useEffect(() => {
     refreshConversations();
     refreshPeopleRequests();
-  }, [token, chatModule]);
+  }, [token, chatModule,refreshConversations, refreshPeopleRequests]);
 
   const handleLocateMe = () => {
     if (navigator.geolocation) {

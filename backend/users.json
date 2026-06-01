@@ -4,11 +4,11 @@
     "created_at": "2026-04-28T14:54:02.164677+00:00",
     "from_currency": "INR",
     "to_currency": "EUR",
-    "lat": 28.623786686726234,
-    "lng": 77.29585759550575,
-    "last_seen_at": "2026-05-29T05:28:41.972288+00:00",
+    "lat": 28.62374824585635,
+    "lng": 77.29586228344513,
+    "last_seen_at": "2026-05-30T09:58:08.480009+00:00",
     "people_finder_live": false,
-    "people_search_range_km": 10.0
+    "people_search_range_km": 1.0
   },
   "nikhileshhotshot2002@gmail.com": {
     "email": "nikhileshhotshot2002@gmail.com",
