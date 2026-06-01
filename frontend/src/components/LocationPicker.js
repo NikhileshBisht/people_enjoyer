@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { MapContainer, TileLayer, useMap, useMapEvents, CircleMarker, Circle, Tooltip } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { X, LocateFixed, MessageCircle, Send, UserPlus } from 'lucide-react';
