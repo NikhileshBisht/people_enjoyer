@@ -315,7 +315,13 @@ const refreshPeopleRequests = useCallback(async () => {
   useEffect(() => {
     refreshConversations();
     refreshPeopleRequests();
-  }, [token, chatModule,refreshConversations, refreshPeopleRequests]);
+  }, [
+    token,
+    chatModule,
+    apiBase,
+    refreshConversations,
+    refreshPeopleRequests,
+  ]);
 
   const handleLocateMe = () => {
     if (navigator.geolocation) {
