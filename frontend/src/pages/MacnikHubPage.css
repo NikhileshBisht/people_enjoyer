@@ -1,0 +1,201 @@
+.macnik-dashboard {
+  position: relative;
+  min-height: 100vh;
+  padding: 28px 32px 120px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.macnik-dashboard-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, #cbd5e1 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: 0.35;
+  mask-image: linear-gradient(to bottom, black 0%, transparent 85%);
+}
+
+.macnik-dashboard-bg::after {
+  content: '';
+  position: absolute;
+  left: -10%;
+  right: -10%;
+  bottom: -80px;
+  height: 280px;
+  background:
+    radial-gradient(ellipse 80% 100% at 20% 100%, rgba(59, 130, 246, 0.2), transparent 60%),
+    radial-gradient(ellipse 70% 90% at 80% 100%, rgba(99, 102, 241, 0.18), transparent 55%);
+  filter: blur(2px);
+}
+
+.macnik-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+}
+
+.macnik-dashboard-header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 36px;
+}
+
+.macnik-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.macnik-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(135deg, #2563eb 0%, #6366f1 100%);
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.3);
+}
+
+.macnik-brand-text {
+  font-size: 28px;
+  font-weight: 700;
+  color: #2563eb;
+  letter-spacing: -0.02em;
+}
+
+.macnik-logout-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.macnik-welcome {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 28px;
+}
+
+.macnik-welcome-label {
+  margin: 0 0 6px;
+  color: #64748b;
+  font-size: 15px;
+}
+
+.macnik-welcome h1 {
+  margin: 0 0 10px;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 800;
+  color: #0f172a;
+  word-break: break-all;
+}
+
+.macnik-welcome-sub {
+  margin: 0;
+  color: #475569;
+  font-size: 16px;
+}
+
+.macnik-dashboard-cards {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  max-width: 1100px;
+}
+
+.macnik-dashboard-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  text-align: left;
+  padding: 24px;
+  border: 1px solid #e8edf3;
+  border-radius: 18px;
+  background: #fff;
+  cursor: pointer;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.macnik-dashboard-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(37, 99, 235, 0.12);
+}
+
+.macnik-dashboard-card-icon {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.macnik-dashboard-card-icon.currency {
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+}
+
+.macnik-dashboard-card-icon.people {
+  background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+}
+
+.macnik-dashboard-card-body h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.macnik-dashboard-card-body p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #64748b;
+}
+
+.macnik-dashboard-chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  margin-top: 4px;
+  color: #2563eb;
+}
+
+.macnik-dashboard-chevron.people-chevron {
+  color: #0ea5e9;
+}
+
+@media (max-width: 640px) {
+  .macnik-dashboard {
+    padding: 20px 16px 100px;
+  }
+
+  .macnik-dashboard-card {
+    flex-wrap: wrap;
+  }
+
+  .macnik-dashboard-chevron {
+    margin-left: 0;
+  }
+}
