@@ -20,13 +20,12 @@ load_dotenv(BACKEND_DIR / ".env")
 
 app = FastAPI(title="OTP JWT Auth Service")
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://people-enjoyer-n6il-reax.vercel.app"
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
