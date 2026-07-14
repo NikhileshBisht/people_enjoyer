@@ -20,7 +20,6 @@ load_dotenv(BACKEND_DIR / ".env")
 
 app = FastAPI(title="OTP JWT Auth Service")
 
-from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,11 +66,19 @@ class PeopleRequestBody(BaseModel):
 def _load_users_from_db() -> None:
     """Populate the in-memory cache from the Supabase users table."""
     global users
-    res = supabase.table("users").select("*").execute()
-    users = {row["email"]: row for row in (res.data or [])}
+    if not supabase:
+        print("Warning: Supabase client is not initialized. Skipping _load_users_from_db.")
+        return
+    try:
+        res = supabase.table("users").select("*").execute()
+        users = {row["email"]: row for row in (res.data or [])}
+    except Exception as e:
+        print(f"Error loading users from DB: {e}")
 
 
 def _save_user(email: str) -> None:
+    if not supabase:
+        return
     record = users.get(email)
     if record is None:
         return
@@ -79,21 +86,29 @@ def _save_user(email: str) -> None:
     record_to_save = dict(record)
     record_to_save.pop("id", None)
 
-    supabase.table("users").upsert(
-        record_to_save,
-        on_conflict="email"
-    ).execute()
-
-
-def _save_users() -> None:
-    for email, record in users.items():
-        record_to_save = dict(record)
-        record_to_save.pop("id", None)
-
+    try:
         supabase.table("users").upsert(
             record_to_save,
             on_conflict="email"
         ).execute()
+    except Exception as e:
+        print(f"Error saving user to DB: {e}")
+
+
+def _save_users() -> None:
+    if not supabase:
+        return
+    for email, record in users.items():
+        record_to_save = dict(record)
+        record_to_save.pop("id", None)
+
+        try:
+            supabase.table("users").upsert(
+                record_to_save,
+                on_conflict="email"
+            ).execute()
+        except Exception as e:
+            print(f"Error saving users to DB: {e}")
 
 
 # ---------------------------------------------------------------------------
