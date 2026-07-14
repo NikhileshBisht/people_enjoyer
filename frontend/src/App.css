@@ -142,9 +142,9 @@ body {
 
 .back-macnik-btn,
 .map-back-btn {
-  border: 1px solid #ffd0dc;
-  background: #fff5f8;
-  color: #ff3269;
+  border: 1px solid white;
+  background: black;
+  color: white;
   border-radius: 8px;
   padding: 8px 12px;
   cursor: pointer;
@@ -249,4 +249,10 @@ body {
 /* Hide scrollbar */
 .category-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.topbar-right-peoplefinder{
+  display: flex;
+  align-items: center;
+  gap: 20px;
 }

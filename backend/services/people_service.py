@@ -1,69 +1,52 @@
-import json
+"""
+services/people_service.py — Connection persistence via Supabase `connections` table.
+
+Public API is identical to the old file-based version so that main.py
+requires no changes.
+"""
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-DATA_DIR = Path(__file__).resolve().parent.parent
-CONNECTIONS_FILE = DATA_DIR / "people_connections.json"
-
-connections_store: Dict[str, dict] = {}
+from db import supabase
 
 
-def _load_json(path: Path) -> dict:
-    try:
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            return {}
-        loaded = json.loads(content)
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+# ---------------------------------------------------------------------------
+# Startup hook — no-op with Supabase
+# ---------------------------------------------------------------------------
+
+def load_connections() -> None:
+    """No-op: data lives in Supabase, not files."""
+    pass
 
 
-def _save_json(path: Path, payload: dict) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def connection_key(email_a: str, email_b: str) -> str:
     first, second = sorted([email_a.lower(), email_b.lower()])
     return f"{first}::{second}"
 
 
-def load_connections() -> None:
-    global connections_store
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONNECTIONS_FILE.exists():
-        CONNECTIONS_FILE.write_text("{}", encoding="utf-8")
-    loaded = _load_json(CONNECTIONS_FILE)
-    connections_store = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+def _get_connection(key: str) -> Optional[dict]:
+    res = (
+        supabase.table("connections")
+        .select("*")
+        .eq("id", key)
+        .maybe_single()
+        .execute()
+    )
+    return res.data  # None when not found
 
 
-def save_connections() -> None:
-    _save_json(CONNECTIONS_FILE, connections_store)
+def _save_connection(record: dict) -> None:
+    supabase.table("connections").upsert(record).execute()
 
 
-def get_connection(email_a: str, email_b: str) -> Optional[dict]:
-    return connections_store.get(connection_key(email_a, email_b))
-
-
-def connection_status(viewer: str, other: str) -> str:
-    conn = get_connection(viewer, other)
-    if not conn or conn.get("status") == "removed":
-        return "none"
-    status = conn.get("status")
-    if status == "accepted":
-        return "accepted"
-    if status == "pending":
-        if conn.get("from") == viewer.lower():
-            return "pending_outgoing"
-        return "pending_incoming"
-    return "none"
-
-
-def can_people_chat(viewer: str, other: str) -> bool:
-    return connection_status(viewer, other) == "accepted"
+def _delete_connection(key: str) -> None:
+    supabase.table("connections").delete().eq("id", key).execute()
 
 
 def _partner_profile(email: str, users: dict, build_avatar, ws_connections: dict) -> dict:
@@ -76,14 +59,47 @@ def _partner_profile(email: str, users: dict, build_avatar, ws_connections: dict
     }
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_connection(email_a: str, email_b: str) -> Optional[dict]:
+    return _get_connection(connection_key(email_a, email_b))
+
+
+def connection_status(viewer: str, other: str) -> str:
+    conn = get_connection(viewer, other)
+    if not conn or conn.get("status") == "removed":
+        return "none"
+    status = conn.get("status")
+    if status == "accepted":
+        return "accepted"
+    if status == "pending":
+        if conn.get("from_email") == viewer.lower():
+            return "pending_outgoing"
+        return "pending_incoming"
+    return "none"
+
+
+def can_people_chat(viewer: str, other: str) -> bool:
+    return connection_status(viewer, other) == "accepted"
+
+
 def list_requests(viewer_email: str, users: dict, build_avatar, ws_connections: dict) -> dict:
+    res = (
+        supabase.table("connections")
+        .select("*")
+        .eq("status", "pending")
+        .or_(f"from_email.eq.{viewer_email},to_email.eq.{viewer_email}")
+        .execute()
+    )
+    rows = res.data or []
+
     incoming = []
     outgoing = []
-    for conn in connections_store.values():
-        if conn.get("status") != "pending":
-            continue
-        from_email = conn.get("from", "")
-        to_email = conn.get("to", "")
+    for conn in rows:
+        from_email = conn.get("from_email", "")
+        to_email = conn.get("to_email", "")
         if to_email == viewer_email:
             incoming.append(
                 {
@@ -106,13 +122,14 @@ def list_requests(viewer_email: str, users: dict, build_avatar, ws_connections: 
 def send_request(from_email: str, to_email: str, users: dict) -> dict:
     from_email = from_email.lower()
     to_email = to_email.lower()
+
     if from_email == to_email:
         raise HTTPException(status_code=400, detail="Cannot send a request to yourself.")
     if to_email not in users:
         raise HTTPException(status_code=404, detail="User not found.")
 
     key = connection_key(from_email, to_email)
-    existing = connections_store.get(key)
+    existing = _get_connection(key)
     now = datetime.now(tz=timezone.utc).isoformat()
 
     if existing:
@@ -120,88 +137,91 @@ def send_request(from_email: str, to_email: str, users: dict) -> dict:
         if status == "accepted":
             raise HTTPException(status_code=409, detail="You are already connected.")
         if status == "pending":
-            if existing.get("from") == from_email:
+            if existing.get("from_email") == from_email:
                 raise HTTPException(status_code=409, detail="Request already sent.")
             raise HTTPException(status_code=409, detail="This user already sent you a request.")
 
     record = {
         "id": key,
-        "from": from_email,
-        "to": to_email,
+        "from_email": from_email,
+        "to_email": to_email,
         "status": "pending",
         "created_at": now,
         "updated_at": now,
     }
-    connections_store[key] = record
-    save_connections()
-    return record
+    _save_connection(record)
+    # Return with "from"/"to" keys so main.py notification code works unchanged
+    return {**record, "from": from_email, "to": to_email}
 
 
 def accept_request(viewer_email: str, request_id: str, users: dict) -> dict:
-    conn = connections_store.get(request_id)
+    conn = _get_connection(request_id)
     if not conn or conn.get("status") != "pending":
         raise HTTPException(status_code=404, detail="Request not found.")
-    if conn.get("to") != viewer_email.lower():
+    if conn.get("to_email") != viewer_email.lower():
         raise HTTPException(status_code=403, detail="Not allowed to accept this request.")
 
+    now = datetime.now(tz=timezone.utc).isoformat()
     conn["status"] = "accepted"
-    conn["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
-    connections_store[request_id] = conn
-    save_connections()
-    return conn
+    conn["updated_at"] = now
+    _save_connection(conn)
+    # Expose "from"/"to" for notification code in main.py
+    return {**conn, "from": conn["from_email"], "to": conn["to_email"]}
 
 
 def reject_request(viewer_email: str, request_id: str) -> dict:
-    conn = connections_store.get(request_id)
+    conn = _get_connection(request_id)
     if not conn or conn.get("status") != "pending":
         raise HTTPException(status_code=404, detail="Request not found.")
-    if conn.get("to") != viewer_email.lower():
+    if conn.get("to_email") != viewer_email.lower():
         raise HTTPException(status_code=403, detail="Not allowed to reject this request.")
 
-    connections_store.pop(request_id, None)
-    save_connections()
+    _delete_connection(request_id)
     return {"message": "Request rejected."}
 
 
-def list_accepted_connections(
-    viewer_email: str, users: dict, build_avatar, ws_connections: dict
-) -> List[dict]:
-    viewer_email = viewer_email.lower()
-    partners = []
-    for conn in connections_store.values():
-        if conn.get("status") != "accepted":
-            continue
-        from_email = conn.get("from", "")
-        to_email = conn.get("to", "")
-        if viewer_email not in (from_email, to_email):
-            continue
-        partner_email = to_email if from_email == viewer_email else from_email
-        partners.append(_partner_profile(partner_email, users, build_avatar, ws_connections))
-    return partners
-
-
 def cancel_request(viewer_email: str, request_id: str) -> dict:
-    conn = connections_store.get(request_id)
+    conn = _get_connection(request_id)
     if not conn or conn.get("status") != "pending":
         raise HTTPException(status_code=404, detail="Request not found.")
-    if conn.get("from") != viewer_email.lower():
+    if conn.get("from_email") != viewer_email.lower():
         raise HTTPException(status_code=403, detail="Not allowed to cancel this request.")
 
-    connections_store.pop(request_id, None)
-    save_connections()
+    _delete_connection(request_id)
     return {"message": "Request cancelled."}
 
 
 def remove_connection(viewer_email: str, partner_email: str) -> dict:
     partner_email = partner_email.lower()
     key = connection_key(viewer_email, partner_email)
-    conn = connections_store.get(key)
+    conn = _get_connection(key)
     if not conn or conn.get("status") != "accepted":
         raise HTTPException(status_code=404, detail="Connection not found.")
 
-    connections_store.pop(key, None)
-    save_connections()
+    _delete_connection(key)
     return {"message": "Connection removed.", "partner": partner_email}
+
+
+def list_accepted_connections(
+    viewer_email: str, users: dict, build_avatar, ws_connections: dict
+) -> List[dict]:
+    viewer_email = viewer_email.lower()
+    res = (
+        supabase.table("connections")
+        .select("*")
+        .eq("status", "accepted")
+        .or_(f"from_email.eq.{viewer_email},to_email.eq.{viewer_email}")
+        .execute()
+    )
+    rows = res.data or []
+
+    partners = []
+    for conn in rows:
+        from_email = conn.get("from_email", "")
+        to_email = conn.get("to_email", "")
+        partner_email = to_email if from_email == viewer_email else from_email
+        partners.append(_partner_profile(partner_email, users, build_avatar, ws_connections))
+    return partners
 
 
 def enrich_people_matches(matches: List[dict], viewer_email: str) -> List[dict]:

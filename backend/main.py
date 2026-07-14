@@ -1,4 +1,3 @@
-import json
 import math
 import os
 from datetime import datetime, timedelta, timezone
@@ -6,12 +5,18 @@ from pathlib import Path
 from typing import Dict, Optional, Any, List
 
 import jwt
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 
+from db import supabase
 from otp import OtpService, OtpStore, init_otp_service, router as otp_router
 from services import chat_service, people_service
+from enjoyer import router as enjoyer_router
+
+BACKEND_DIR = Path(__file__).resolve().parent
+load_dotenv(BACKEND_DIR / ".env")
 
 app = FastAPI(title="OTP JWT Auth Service")
 
@@ -27,15 +32,22 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-this-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "60"))
 
-DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
-USERS_FILE = DATA_DIR / "users.json"
-
+# ---------------------------------------------------------------------------
+# In-memory user cache — loaded from Supabase on startup, kept in sync.
+# Used for fast WebSocket lookups (currency match, people finder).
+# All writes go through _save_user() which updates both cache and DB.
+# ---------------------------------------------------------------------------
 users: Dict[str, dict] = {}
 otp_store = OtpStore()
 ws_connections: Dict[str, WebSocket] = {}
 
 app.include_router(otp_router)
+app.include_router(enjoyer_router)
 
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 class SendMessageRequest(BaseModel):
     to_email: EmailStr
@@ -46,49 +58,45 @@ class PeopleRequestBody(BaseModel):
     to_email: EmailStr
 
 
-def _ensure_data_files() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not USERS_FILE.exists():
-        USERS_FILE.write_text("{}", encoding="utf-8")
+# ---------------------------------------------------------------------------
+# Supabase user helpers
+# ---------------------------------------------------------------------------
 
-
-def _load_json(path: Path) -> Dict[str, dict]:
-    try:
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            return {}
-        loaded = json.loads(content)
-        if isinstance(loaded, dict):
-            return loaded
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {}
-
-
-def _save_json(path: Path, payload: Dict[str, dict]) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _load_state() -> None:
+def _load_users_from_db() -> None:
+    """Populate the in-memory cache from the Supabase users table."""
     global users
-    _ensure_data_files()
-    users = _load_json(USERS_FILE)
-    otp_store.load()
-    chat_service.load_chats()
-    people_service.load_connections()
-    init_otp_service(
-        OtpService(
-            store=otp_store,
-            users=users,
-            save_users=_save_users,
-            create_access_token=_create_access_token,
-        )
-    )
+    res = supabase.table("users").select("*").execute()
+    users = {row["email"]: row for row in (res.data or [])}
+
+
+def _save_user(email: str) -> None:
+    record = users.get(email)
+    if record is None:
+        return
+
+    record_to_save = dict(record)
+    record_to_save.pop("id", None)
+
+    supabase.table("users").upsert(
+        record_to_save,
+        on_conflict="email"
+    ).execute()
 
 
 def _save_users() -> None:
-    _save_json(USERS_FILE, users)
+    for email, record in users.items():
+        record_to_save = dict(record)
+        record_to_save.pop("id", None)
 
+        supabase.table("users").upsert(
+            record_to_save,
+            on_conflict="email"
+        ).execute()
+
+
+# ---------------------------------------------------------------------------
+# JWT helpers
+# ---------------------------------------------------------------------------
 
 def _create_access_token(email: str) -> str:
     now = datetime.now(tz=timezone.utc)
@@ -119,6 +127,10 @@ def _decode_token(token: str) -> dict:
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired token.") from exc
 
+
+# ---------------------------------------------------------------------------
+# Misc helpers
+# ---------------------------------------------------------------------------
 
 def _build_avatar(email: str) -> str:
     name = email.split("@", 1)[0]
@@ -224,6 +236,29 @@ def _build_match_payload(viewer_email: str, from_currency: str, to_currency: str
         "matches": results,
     }
 
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+def _load_state() -> None:
+    _load_users_from_db()
+    otp_store.load()          # no-op with Supabase
+    chat_service.load_chats() # no-op with Supabase
+    people_service.load_connections()  # no-op with Supabase
+    init_otp_service(
+        OtpService(
+            store=otp_store,
+            users=users,
+            save_users=_save_users,
+            create_access_token=_create_access_token,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -457,6 +492,10 @@ async def delete_people_connection(
     return result
 
 
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
+
 @app.websocket("/ws/match")
 async def match_socket(websocket: WebSocket):
     token = websocket.query_params.get("token")
@@ -504,9 +543,10 @@ async def match_socket(websocket: WebSocket):
                     user["lng"] = float(lng)
                 user["last_seen_at"] = datetime.now(tz=timezone.utc).isoformat()
                 users[email] = user
-                _save_users()
+                _save_user(email)
 
                 await websocket.send_json(_build_match_payload(email, from_currency, to_currency))
+
             elif message_type == "search_people":
                 lat = raw.get("lat")
                 lng = raw.get("lng")
@@ -531,11 +571,12 @@ async def match_socket(websocket: WebSocket):
                 user["people_search_range_km"] = range_km
                 user["last_seen_at"] = datetime.now(tz=timezone.utc).isoformat()
                 users[email] = user
-                _save_users()
+                _save_user(email)
 
                 await websocket.send_json(
                     _build_people_payload(email, float(lat), float(lng), range_km)
                 )
+
             elif message_type == "send_message":
                 to_email = str(raw.get("toEmail", "")).lower()
                 text = str(raw.get("text", ""))
@@ -577,7 +618,7 @@ async def match_socket(websocket: WebSocket):
             ws_connections.pop(email, None)
         if email in users:
             users[email]["people_finder_live"] = False
-            _save_users()
+            _save_user(email)
 
 
 _load_state()

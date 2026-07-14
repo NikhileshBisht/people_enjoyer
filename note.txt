@@ -1,0 +1,9 @@
+frontend start:
+cd frontend
+npm start
+
+
+backend start:
+cd backend
+venv\Scripts\activate
+python -m uvicorn main:app --reload

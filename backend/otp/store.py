@@ -1,51 +1,56 @@
-import json
+"""
+otp/store.py — OTP persistence via Supabase.
+
+Public API is identical to the old file-based OtpStore so that
+service.py and main.py require no changes.
+"""
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
-from .config import OTP_DIR, OTP_STORE_FILE
-
-LEGACY_OTP_STORE_FILE = OTP_DIR.parent / "otp_store.json"
+from db import supabase
 
 
 class OtpStore:
-    def __init__(self) -> None:
-        self._records: Dict[str, dict] = {}
+    """Thin wrapper around the Supabase `otp_store` table."""
 
+    # ------------------------------------------------------------------
+    # Compatibility shim: main.py calls otp_store.load() on startup.
+    # With Supabase there is nothing to load from disk.
+    # ------------------------------------------------------------------
     def load(self) -> None:
-        OTP_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if not OTP_STORE_FILE.exists() and LEGACY_OTP_STORE_FILE.exists():
-            OTP_STORE_FILE.write_text(
-                LEGACY_OTP_STORE_FILE.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-        if not OTP_STORE_FILE.exists():
-            OTP_STORE_FILE.write_text("{}", encoding="utf-8")
-            self._records = {}
-            return
-        try:
-            content = OTP_STORE_FILE.read_text(encoding="utf-8").strip()
-            if not content:
-                self._records = {}
-                return
-            loaded = json.loads(content)
-            self._records = loaded if isinstance(loaded, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            self._records = {}
+        pass
 
-    def save(self) -> None:
-        OTP_STORE_FILE.write_text(json.dumps(self._records, indent=2), encoding="utf-8")
-
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
     def get(self, key: str) -> Optional[dict]:
-        return self._records.get(key)
+        """Return the OTP record for *key*, or None if not found."""
+        res = (
+            supabase.table("otp_store")
+            .select("otp,expires_at")
+            .eq("key", key)
+            .maybe_single()
+            .execute()
+        )
+        return res.data  # None when no row found
 
     def set(self, key: str, record: dict) -> None:
-        self._records[key] = record
-        self.save()
+        """Insert or replace the OTP record for *key*."""
+        supabase.table("otp_store").upsert(
+            {
+                "key": key,
+                "otp": record["otp"],
+                "expires_at": record["expires_at"],
+            }
+        ).execute()
 
     def pop(self, key: str) -> None:
-        if key in self._records:
-            self._records.pop(key)
-            self.save()
+        """Delete the OTP record for *key* (if it exists)."""
+        supabase.table("otp_store").delete().eq("key", key).execute()
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     @staticmethod
     def purpose_key(email: str, purpose: str) -> str:
         return f"{purpose}:{email.lower()}"
@@ -58,21 +63,6 @@ class OtpStore:
         return parsed.astimezone(timezone.utc)
 
     def cleanup_expired(self) -> None:
-        now = datetime.now(tz=timezone.utc)
-        expired_keys = []
-        for key, record in self._records.items():
-            expires_at = record.get("expires_at")
-            if not expires_at:
-                expired_keys.append(key)
-                continue
-            try:
-                expires_dt = self._parse_iso_datetime(expires_at)
-            except ValueError:
-                expired_keys.append(key)
-                continue
-            if now > expires_dt:
-                expired_keys.append(key)
-        for key in expired_keys:
-            self._records.pop(key, None)
-        if expired_keys:
-            self.save()
+        """Delete all rows whose expires_at is in the past."""
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        supabase.table("otp_store").delete().lt("expires_at", now_iso).execute()

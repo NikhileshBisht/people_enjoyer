@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_DIR / ".env")
 
-OTP_DIR = Path(__file__).resolve().parent
-OTP_STORE_FILE = OTP_DIR / "otp_store.json"
 OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "5"))
 
 SMTP_HOST = os.getenv("SMTP_HOST")

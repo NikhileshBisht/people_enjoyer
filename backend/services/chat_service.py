@@ -1,78 +1,57 @@
-import json
+"""
+services/chat_service.py — Chat persistence via Supabase `messages` table.
+
+Public API is identical to the old file-based version so that main.py
+requires no changes beyond removing the _load_state file calls.
+"""
 import random
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 
-DATA_DIR = Path(__file__).resolve().parent.parent
-CURRENCY_CHAT_FILE = DATA_DIR / "currency_chat_store.json"
-PEOPLE_CHAT_FILE = DATA_DIR / "people_chat_store.json"
-LEGACY_CHAT_FILE = DATA_DIR / "chat_store.json"
+from db import supabase
 
 CHAT_MODULES = {"currency", "people"}
 
-currency_chat_store: Dict[str, List[dict]] = {}
-people_chat_store: Dict[str, List[dict]] = {}
+
+# ---------------------------------------------------------------------------
+# Startup hook — no-op with Supabase (nothing to load from disk)
+# ---------------------------------------------------------------------------
+
+def load_chats() -> None:
+    """No-op: data lives in Supabase, not files."""
+    pass
 
 
-def _store_for_module(module: str) -> Dict[str, List[dict]]:
-    if module == "currency":
-        return currency_chat_store
-    if module == "people":
-        return people_chat_store
-    raise HTTPException(status_code=400, detail="Invalid chat module.")
-
-
-def _chat_file_for_module(module: str) -> Path:
-    return CURRENCY_CHAT_FILE if module == "currency" else PEOPLE_CHAT_FILE
-
-
-def _load_json(path: Path) -> dict:
-    try:
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            return {}
-        loaded = json.loads(content)
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _save_json(path: Path, payload: dict) -> None:
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _thread_key(email_a: str, email_b: str) -> str:
     first, second = sorted([email_a.lower(), email_b.lower()])
     return f"{first}::{second}"
 
 
-def load_chats() -> None:
-    global currency_chat_store, people_chat_store
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if LEGACY_CHAT_FILE.exists() and not CURRENCY_CHAT_FILE.exists():
-        legacy = _load_json(LEGACY_CHAT_FILE)
-        currency_chat_store = {k: v for k, v in legacy.items() if isinstance(v, list)}
-        _save_json(CURRENCY_CHAT_FILE, currency_chat_store)
-    else:
-        loaded_currency = _load_json(CURRENCY_CHAT_FILE)
-        currency_chat_store = {k: v for k, v in loaded_currency.items() if isinstance(v, list)}
-
-    loaded_people = _load_json(PEOPLE_CHAT_FILE)
-    people_chat_store = {k: v for k, v in loaded_people.items() if isinstance(v, list)}
-
-    for path in (CURRENCY_CHAT_FILE, PEOPLE_CHAT_FILE):
-        if not path.exists():
-            _save_json(path, {})
+def _fetch_thread_messages(module: str, email_a: str, email_b: str) -> List[dict]:
+    """Return all messages (both directions) for a given thread + module."""
+    res = (
+        supabase.table("messages")
+        .select("*")
+        .eq("module", module)
+        .or_(
+            f"and(sender.eq.{email_a},recipient.eq.{email_b}),"
+            f"and(sender.eq.{email_b},recipient.eq.{email_a})"
+        )
+        .order("sent_at", desc=False)
+        .execute()
+    )
+    return res.data or []
 
 
-def save_chats(module: str) -> None:
-    store = _store_for_module(module)
-    _save_json(_chat_file_for_module(module), store)
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def create_message(sender: str, recipient: str, text: str) -> dict:
     return {
@@ -117,12 +96,21 @@ def send_message(
     if len(clean_text) > 1000:
         raise HTTPException(status_code=400, detail="Message is too long.")
 
-    store = _store_for_module(module)
-    thread = _thread_key(sender, recipient)
     message = create_message(sender, recipient, clean_text)
     message["module"] = module
-    store.setdefault(thread, []).append(message)
-    save_chats(module)
+
+    supabase.table("messages").insert(
+        {
+            "id": message["id"],
+            "module": module,
+            "sender": sender,
+            "recipient": recipient,
+            "text": clean_text,
+            "sent_at": message["sent_at"],
+            "read": False,
+        }
+    ).execute()
+
     return message
 
 
@@ -135,20 +123,33 @@ def list_conversations(
     build_avatar,
     partner_filter: Optional[Callable[[str, str], bool]] = None,
 ) -> List[dict]:
-    store = _store_for_module(module)
+    # Fetch all messages where the viewer is sender or recipient
+    res = (
+        supabase.table("messages")
+        .select("sender,recipient,text,sent_at,read,id")
+        .eq("module", module)
+        .or_(f"sender.eq.{viewer_email},recipient.eq.{viewer_email}")
+        .order("sent_at", desc=False)
+        .execute()
+    )
+    messages = res.data or []
+
+    # Group by partner
+    threads: Dict[str, List[dict]] = {}
+    for msg in messages:
+        partner = msg["recipient"] if msg["sender"] == viewer_email else msg["sender"]
+        threads.setdefault(partner, []).append(msg)
+
     conversations = []
-    for thread_key, messages in store.items():
-        left, right = thread_key.split("::", 1)
-        if viewer_email not in (left, right):
-            continue
-        partner = right if left == viewer_email else left
+    for partner, thread_msgs in threads.items():
         if partner_filter and not partner_filter(viewer_email, partner):
             continue
         partner_user = users.get(partner, {})
         unread_count = sum(
-            1 for m in messages if m.get("recipient") == viewer_email and not m.get("read", False)
+            1 for m in thread_msgs
+            if m.get("recipient") == viewer_email and not m.get("read", False)
         )
-        last_message = messages[-1] if messages else None
+        last_message = thread_msgs[-1] if thread_msgs else None
         conversations.append(
             {
                 "partner": {
@@ -178,17 +179,20 @@ def get_messages(
     ws_connections: dict,
     build_avatar,
 ) -> dict:
-    store = _store_for_module(module)
     partner_email = partner_email.lower()
-    thread = _thread_key(viewer_email, partner_email)
-    messages = store.get(thread, [])
-    changed = False
-    for msg in messages:
-        if msg.get("recipient") == viewer_email and not msg.get("read", False):
-            msg["read"] = True
-            changed = True
-    if changed:
-        save_chats(module)
+    messages = _fetch_thread_messages(module, viewer_email, partner_email)
+
+    # Mark unread messages as read
+    unread_ids = [
+        m["id"]
+        for m in messages
+        if m.get("recipient") == viewer_email and not m.get("read", False)
+    ]
+    if unread_ids:
+        supabase.table("messages").update({"read": True}).in_("id", unread_ids).execute()
+        for m in messages:
+            if m["id"] in unread_ids:
+                m["read"] = True
 
     partner = users.get(partner_email, {})
     return {
