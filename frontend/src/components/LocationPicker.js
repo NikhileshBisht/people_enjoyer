@@ -310,7 +310,7 @@ const refreshPeopleRequests = useCallback(async () => {
     return () => {
       socket.close();
     };
-  }, [rangeKm, refreshConversations, refreshPeopleRequests]);
+  }, [rangeKm, refreshConversations, refreshPeopleRequests, apiBase, chatModule, token]);
 
   useEffect(() => {
     refreshConversations();
